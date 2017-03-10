@@ -84,17 +84,9 @@ function _ef_ads_load_ads($tid, $limit, $nid = 0) {
 
   $result = array();
   $term_ids = array();
-  $current_node = '';
 
   if (is_array($tid)) $term_ids = $tid; else $term_ids[] = $tid;
-
-  if (is_numeric($nid)) {
-    $current_node = node_load($nid);
-  }
-
   if (is_numeric($limit)) {
-
-    $ad_settings = _simpleads_adgroup_settings($tid);
     $order_delta = isset($ad_settings['ads_order']) ? $ad_settings['ads_order'] : 'random';
     $queries = module_invoke_all('simpleads_order', $order_delta, $term_ids, $limit, $nid);
 
@@ -103,8 +95,6 @@ function _ef_ads_load_ads($tid, $limit, $nid = 0) {
         foreach ($queries[$i] as $row) {
           $node = node_load($row->nid);
           $active = TRUE;
-          $matched_nodes = FALSE;
-          $matched_terms = FALSE;
           if (isset($node->field_ad_status[$node->language])) {
             if ($node->field_ad_status[$node->language][0]['value'] != 1) {
               $active = FALSE;
@@ -115,9 +105,7 @@ function _ef_ads_load_ads($tid, $limit, $nid = 0) {
           }
         }
       }
-      dsm($result);
     }
-
   }
 
   return $result;
@@ -172,7 +160,6 @@ function ef_ads_simpleads_order($delta, $term_ids, $limit, $nid = 0) {
 
   // Check if related nodes settings is enabled.
   if (isset($ad_settings['check_related_node']) && !empty($ad_settings['check_related_node']) && !empty($nid)) {
-    dsm('I come here');
     // Finds the relation entity id first.
     $rid_query = db_select('field_data_endpoints', 'fde')
       ->fields('fde', array('entity_id'))
