@@ -1,0 +1,334 @@
+<?php
+
+/**
+ * @file
+ * EF Ads helper and alter functions
+ */
+
+/*
+ * Implements hook_form_alter().
+ */
+function ef_ads_form_alter(&$form, &$form_state, $form_id) {
+  if ($form_id == 'block_admin_configure') {
+    if (arg(4) == 'simpleads') {
+      $ad_settings = array();
+      if (arg(5)) {
+        $tid = explode('ad_groups_', arg(5));
+        if (isset($tid[1])) {
+          $query = db_select('simpleads_blocks', 's')
+            ->fields('s')
+            ->condition('s.tid', $tid[1]);
+          $ad_obj = $query->execute()->fetchAssoc();
+          $ad_settings = unserialize($ad_obj['settings']);
+        }
+      }
+      $form['settings']['check_related_node'] = array(
+        '#title' => t('Check Related nodes'),
+        '#type' => 'checkbox',
+        '#default_value' => isset($ad_settings['check_related_node']) ? $ad_settings['check_related_node'] : FALSE,
+      );
+      $form['settings']['check_related_taxonomy'] = array(
+        '#title' => t('Check Related taxonomies'),
+        '#type' => 'checkbox',
+        '#default_value' => isset($ad_settings['check_related_taxonomy']) ? $ad_settings['check_related_taxonomy'] : FALSE,
+      );
+      $form['#submit'][] = 'ef_ads_save_configurations';
+    }
+  }
+}
+
+// Submit handler for simple ads block configuration.
+function ef_ads_save_configurations($form, $form_state) {
+  $tid = explode('ad_groups_', $form_state['values']['delta']);
+  if (isset($tid[1])) {
+    $query = db_select('simpleads_blocks', 's')
+      ->fields('s')
+      ->condition('s.tid', $tid[1]);
+    $ad_obj = $query->execute()->fetchAssoc();
+    $ad_settings = unserialize($ad_obj['settings']);
+    $ad_settings['check_related_node'] = $form_state['values']['check_related_node'];
+    $ad_settings['check_related_taxonomy'] = $form_state['values']['check_related_taxonomy'];
+    db_update('simpleads_blocks')
+      ->fields(array(
+        'settings' => serialize($ad_settings),
+      ))
+      ->condition('tid', $tid[1])
+      ->execute();
+  }
+}
+
+/*
+ * Implements hook_menu_alter().
+ */
+function ef_ads_menu_alter(&$items) {
+  // Alter page callback for simple ads
+  $items['simpleads/load/%/%']['page callback'] = 'ef_ads_show_ads';
+  // Alter page callback for simple ads
+  $items['simpleads/load/%/%']['page arguments'] = array(2, 3, 4);
+}
+
+function ef_ads_show_ads($tid, $limit, $nid) {
+  drupal_page_is_cacheable(FALSE);
+  if (is_numeric($tid)) {
+    $nodes = _ef_ads_load_ads($tid, $limit, $nid);
+    print _simpleads_render_ajax_template($nodes, $tid, $limit);
+  }
+  exit;
+}
+
+/**
+ * Helper function.
+ * Returns data array for an adertisement block.
+ *
+ * @param int $tid
+ * @param int $limit
+ * @return array
+ */
+function _ef_ads_load_ads($tid, $limit, $nid = 0) {
+
+  $result = array();
+  $term_ids = array();
+
+  if (is_array($tid)) {
+    $term_ids = $tid;
+  }
+  else {
+    $term_ids[] = $tid;
+  }
+  if (is_numeric($limit)) {
+    $order_delta = isset($ad_settings['ads_order']) ? $ad_settings['ads_order'] : 'random';
+    $queries = module_invoke_all('simpleads_order', $order_delta, $term_ids, $limit, $nid);
+
+    if (count($queries) > 0) {
+      foreach ($queries as $i => $query) {
+        foreach ($queries[$i] as $row) {
+          $node = node_load($row->nid);
+          $active = TRUE;
+          if (isset($node->field_ad_status[$node->language])) {
+            if ($node->field_ad_status[$node->language][0]['value'] != 1) {
+              $active = FALSE;
+            }
+          }
+          if ($active) {
+            $result[] = _simpleads_ads_data($node);
+          }
+        }
+      }
+    }
+  }
+
+  return $result;
+}
+
+/*
+ * Implements hook_module_implements_alter().
+ */
+function ef_ads_module_implements_alter(&$implementations, $hook) {
+  if ($hook == 'simpleads_order') {
+    // Move my_module_rdf_mapping() to the end of the list. module_implements()
+    // iterates through $implementations with a foreach loop which PHP iterates
+    // in the order that the items were added, so to move an item to the end of
+    // the array, we remove it and then add it.
+    unset($implementations['simpleads']);
+  }
+}
+
+
+/**
+ * Implements hook_simpleads_order().
+ */
+function ef_ads_simpleads_order($delta, $term_ids, $limit, $nid = 0) {
+  // Usually multiple tids are not passed.
+  $tid = reset($term_ids);
+  $ad_settings = _simpleads_adgroup_settings($tid);
+  // Check if related taxonomies settings is enabled for ad block.
+  $matched_tids = array();
+  if (isset($ad_settings['check_related_taxonomy']) && !empty($ad_settings['check_related_taxonomy']) && !empty($nid)) {
+    $sub_query = db_select('taxonomy_index', 'tit')
+      ->fields('tit', array('tid'))
+      ->condition('tit.nid', $nid);
+    $matched_tids = $sub_query->execute()->fetchAllKeyed(0, 0);
+  }
+
+  $query = db_select('node', 'n');
+  $query->join('taxonomy_index', 'ti', 'n.nid = ti.nid');
+  $query->join('field_data_field_ad_status', 'f', 'n.nid = f.entity_id');
+  $query->fields('n', array('nid'));
+  $query->condition('n.type', 'simpleads');
+  $query->condition('f.entity_type', 'node');
+  $query->condition('f.field_ad_status_value', 1);
+  $query->condition('ti.tid', $term_ids, 'IN');
+  $query->condition('n.status', 1);
+  $query->range(0, $limit);
+  $query->addTag('node_access');
+
+  // Check if related nodes settings is enabled.
+  if (isset($ad_settings['check_related_node']) && !empty($ad_settings['check_related_node']) && !empty($nid)) {
+    // Finds the relation entity id first.
+    $rid_query = db_select('field_data_endpoints', 'fde')
+      ->fields('fde', array('entity_id'))
+      ->condition('fde.entity_type', 'relation')
+      ->condition('fde.bundle', 'symetric_node_relation')
+      // 1 denotes as the target, so check current is selected as target in simpleads node.
+      ->condition('fde.endpoints_r_index', 1)
+      ->condition('fde.endpoints_entity_id', $nid);
+    $rid = $rid_query->execute()->fetchAllKeyed(0, 0);
+    if (!empty($rid)) {
+      $nid_query = db_select('field_data_endpoints', 'fde')
+        ->fields('fde', array('endpoints_entity_id'))
+        ->condition('fde.entity_type', 'relation')
+        ->condition('fde.bundle', 'symetric_node_relation')
+        ->condition('fde.endpoints_r_index', 0)
+        ->condition('entity_id', $rid, 'IN');
+      $nids = $nid_query->execute()->fetchAllKeyed(0, 0);
+      if (!empty($nids)) {
+        $query->condition('n.nid', $nids, 'IN');
+      }
+
+      else {
+        // Put this as if no related nids found, no simpleads should be shown.
+        $query->isNull('n.nid');
+      }
+    }
+
+    else {
+      // Put this as if no relation exists, no simpleads should be shown.
+      $query->isNull('n.nid');
+    }
+  }
+
+  // Random order.
+  if ($delta == 'random') {
+    $query->orderRandom();
+  }
+  // Order by created date.
+  if ($delta == 'order_created_desc') {
+    $query->orderBy('n.created', 'DESC');
+  }
+  // Order by modified date.
+  if ($delta == 'order_modified_desc') {
+    $query->orderBy('n.changed', 'DESC');
+  }
+  // Order by title
+  if ($delta == 'order_title_asc') {
+    $query->orderBy('n.title', 'ASC');
+  }
+  // Nodequeue module integration
+  if (module_exists('nodequeue')) {
+    $qids = nodequeue_get_qids('simpleads');
+    foreach ($qids as $row) {
+      if ($delta == 'nqueue_' . $row->qid) {
+        $query = db_select('nodequeue_nodes', 'nn');
+        $query->fields('nn', array('nid'));
+        $query->condition('nn.qid', $row->qid);
+        $query->orderBy('nn.position', 'DESC');
+        $query->addTag('node_access');
+      }
+    }
+  }
+
+  if (isset($ad_settings['check_related_taxonomy']) && !empty($ad_settings['check_related_taxonomy'])) {
+    if (!isset($ad_settings['check_related_taxonomy']) || (isset($ad_settings['check_related_taxonomy']) && empty($ad_settings['check_related_taxonomy']))) {
+      // Add this so normal query do not return anything and check for related taxonomy.
+      $query->isNull('n.nid');
+    }
+  }
+  dpq($query);
+  $result = $query->execute();
+
+  // If check related node do not give any results.
+  if (!$result->rowCount()) {
+    if (isset($ad_settings['check_related_taxonomy']) && !empty($ad_settings['check_related_taxonomy'])) {
+      $new_query = db_select('node', 'n');
+      $new_query->join('taxonomy_index', 'ti', 'n.nid = ti.nid');
+      $new_query->join('field_data_field_ad_status', 'f', 'n.nid = f.entity_id');
+      $new_query->fields('n', array('nid'));
+      $new_query->condition('n.type', 'simpleads');
+      $new_query->condition('f.entity_type', 'node');
+      $new_query->condition('f.field_ad_status_value', 1);
+      $new_query->condition('n.status', 1);
+      $new_query->range(0, $limit);
+      $new_query->addTag('node_access');
+
+      if (!empty($matched_tids)) {
+        $new_query->condition('ti.tid', $matched_tids, 'IN');
+      }
+      // To get nids with Simpleads term and other related
+      $new_query->groupBy('n.nid');
+      $new_query->having('COUNT(*) >= 2');
+
+      // Random order.
+      if ($delta == 'random') {
+        $new_query->orderRandom();
+      }
+      // Order by created date.
+      if ($delta == 'order_created_desc') {
+        $new_query->orderBy('n.created', 'DESC');
+      }
+      // Order by modified date.
+      if ($delta == 'order_modified_desc') {
+        $new_query->orderBy('n.changed', 'DESC');
+      }
+      // Order by title
+      if ($delta == 'order_title_asc') {
+        $new_query->orderBy('n.title', 'ASC');
+      }
+      dpq($new_query);
+      $result = $new_query->execute();
+    }
+  }
+
+  // If check related taxonomy do not give any results.
+  if (!$result->rowCount()) {
+    $new_query = db_select('node', 'n');
+    $new_query->join('taxonomy_index', 'ti', 'n.nid = ti.nid');
+    $new_query->join('field_data_field_ad_status', 'f', 'n.nid = f.entity_id');
+    $new_query->fields('n', array('nid'));
+    $new_query->condition('n.type', 'simpleads');
+    $new_query->condition('f.entity_type', 'node');
+    $new_query->condition('f.field_ad_status_value', 1);
+    $new_query->condition('n.status', 1);
+    $new_query->range(0, $limit);
+    $new_query->addTag('node_access');
+    // Random order.
+    if ($delta == 'random') {
+      $new_query->orderRandom();
+    }
+    // Order by created date.
+    if ($delta == 'order_created_desc') {
+      $new_query->orderBy('n.created', 'DESC');
+    }
+    // Order by modified date.
+    if ($delta == 'order_modified_desc') {
+      $new_query->orderBy('n.changed', 'DESC');
+    }
+    // Order by title
+    if ($delta == 'order_title_asc') {
+      $new_query->orderBy('n.title', 'ASC');
+    }
+    dpq($new_query);
+    $result = $new_query->execute();
+  }
+
+  return $result;
+}
+
+/**
+ * Implements hook_theme_registry_alter().
+ */
+function ef_ads_theme_registry_alter(&$theme_registry) {
+  // Defined path to the current module.
+  $module_path = drupal_get_path('module', 'ef_ads');
+  // Find all .tpl.php files in this module's folder recursively.
+  $template_file_objects = drupal_find_theme_templates($theme_registry, '.tpl.php', $module_path);
+  // Iterate through all found template file objects.
+  foreach ($template_file_objects as $key => $template_file_object) {
+    // If the template has not already been overridden by a theme.
+    if (!isset($theme_registry[$key]['theme path']) || !preg_match('#/themes/#', $theme_registry[$key]['theme path'])) {
+      // Alter the theme path and template elements.
+      $theme_registry[$key]['theme path'] = $module_path;
+      $theme_registry[$key] = array_merge($theme_registry[$key], $template_file_object);
+      $theme_registry[$key]['type'] = 'module';
+    }
+  }
+}

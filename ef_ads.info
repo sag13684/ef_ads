@@ -1,0 +1,10 @@
+name = EF Ads
+description = Helper and alter functions for simple ads.
+core = 7.x
+version = 7.x-1.0
+
+scripts[] = js/ef_ads.js
+
+dependencies[] = simpleads
+dependencies[] = relation_endpoint
+dependencies[] = taxonomy
