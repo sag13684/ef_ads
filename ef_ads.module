@@ -233,7 +233,6 @@ function ef_ads_simpleads_order($delta, $term_ids, $limit, $nid = 0) {
       $query->isNull('n.nid');
     }
   }
-  dpq($query);
   $result = $query->execute();
 
   // If check related node do not give any results.
@@ -273,7 +272,6 @@ function ef_ads_simpleads_order($delta, $term_ids, $limit, $nid = 0) {
       if ($delta == 'order_title_asc') {
         $new_query->orderBy('n.title', 'ASC');
       }
-      dpq($new_query);
       $result = $new_query->execute();
     }
   }
@@ -306,7 +304,6 @@ function ef_ads_simpleads_order($delta, $term_ids, $limit, $nid = 0) {
     if ($delta == 'order_title_asc') {
       $new_query->orderBy('n.title', 'ASC');
     }
-    dpq($new_query);
     $result = $new_query->execute();
   }
 
